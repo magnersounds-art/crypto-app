@@ -1,0 +1,24 @@
+
+.env
+__pycache__/
+*.pyc
+*.db
+*.sqlite
+*.sqlite3
+__pycache__/
+*.py[cod]
+.DS_Store
+OLD/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.zip
+__pycache__/
+*.py[cod]
+legacy_score_breakdown.csv
+news_stories_log.csv
+
+.agents/
+ebay Tool.code-workspace

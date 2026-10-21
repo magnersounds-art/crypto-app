@@ -1,0 +1,9 @@
+name,rss_url,category,weight
+CoinDesk,https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml,General,5
+Cointelegraph,https://cointelegraph.com/rss,General,5
+Decrypt,https://decrypt.co/feed,General,5
+Bitcoin Magazine,https://bitcoinmagazine.com/.rss/full/,Bitcoin,5
+CryptoSlate,https://cryptoslate.com/feed/,General,4
+NewsBTC,https://www.newsbtc.com/feed/,Bitcoin,4
+Bitcoin.com News,https://news.bitcoin.com/feed/,General,4
+CryptoPotato,https://cryptopotato.com/feed/,General,4

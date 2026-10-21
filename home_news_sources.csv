@@ -1,0 +1,8 @@
+name,url,signal_type,enabled,score
+Yahoo Finance,https://finance.yahoo.com/markets/crypto/,Top Stories,1,25
+CoinDesk,https://www.coindesk.com/,Featured Stories,1,25
+Cointelegraph,https://cointelegraph.com/,Most Read - 24h,1,25
+The Block,https://www.theblock.co/news,Featured Stories,1,25
+CryptoSlate,https://cryptoslate.com/top-news/,Top News,1,25
+Decrypt,https://decrypt.co/news/editors-picks,Editors' Picks,1,25
+U.Today,https://u.today/,Hot Stories,1,25

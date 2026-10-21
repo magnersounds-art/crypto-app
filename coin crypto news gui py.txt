@@ -1,0 +1,435 @@
+
+import tkinter as tk
+from tkinter import ttk, scrolledtext, messagebox
+import requests
+import webbrowser
+from dotenv import load_dotenv
+import os
+import feedparser
+import csv
+import time
+import re
+from datetime import datetime
+from urllib.parse import urlparse
+import threading
+from dateutil import parser as date_parser
+
+# Load environment variables
+load_dotenv()
+CRYPTO_PANIC_API_KEY = os.getenv("CRYPTO_PANIC_API_KEY")
+CRYPTO_PANIC_URL = "https://cryptopanic.com/api/v1/posts/"
+
+# Dictionary of common cryptocurrency symbols, names, and related terms
+CRYPTO_INFO = {
+    'xrp': {'name': 'XRP', 'alt_names': ['ripple', 'xrpl', 'xrp ledger'], 'official_url': 'https://ripple.com/xrp/', 'subreddit': 'r/XRP'},
+    'eth': {'name': 'Ethereum', 'alt_names': ['ether', 'ethereum 2.0', 'eth2'], 'official_url': 'https://ethereum.org/', 'subreddit': 'r/ethereum'},
+    'btc': {'name': 'Bitcoin', 'alt_names': ['btc'], 'official_url': 'https://bitcoin.org/', 'subreddit': 'r/Bitcoin'},
+    'aave': {'name': 'Aave', 'alt_names': ['aave protocol'], 'official_url': 'https://aave.com/', 'subreddit': 'r/Aave_Official'},
+    'sol': {'name': 'Solana', 'alt_names': ['solana'], 'official_url': 'https://solana.com/', 'subreddit': 'r/solana'},
+    'ada': {'name': 'Cardano', 'alt_names': ['cardano'], 'official_url': 'https://cardano.org/', 'subreddit': 'r/cardano'},
+    'doge': {'name': 'Dogecoin', 'alt_names': ['dogecoin'], 'official_url': 'https://dogecoin.com/', 'subreddit': 'r/dogecoin'},
+    'bnb': {'name': 'Binance Coin', 'alt_names': ['binance coin', 'bnb chain'], 'official_url': 'https://www.binance.com/en/bnb', 'subreddit': 'r/BNBTrader'},
+    'avax': {'name': 'Avalanche', 'alt_names': ['avalanche'], 'official_url': 'https://www.avax.network/', 'subreddit': 'r/Avax'},
+    'matic': {'name': 'Polygon', 'alt_names': ['polygon', 'matic network'], 'official_url': 'https://polygon.technology/', 'subreddit': 'r/0xPolygon'}
+}
+
+# RSS Feed Functions
+def load_websites_from_csv(csv_file="websites.csv"):
+    """
+    Load website RSS feed URLs from a CSV file.
+    Expected CSV format: name,rss_url,category
+    """
+    websites = []
+
+    if not os.path.exists(csv_file):
+        print(f"CSV file '{csv_file}' not found. Creating a sample file...")
+        with open(csv_file, 'w', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow(['name', 'rss_url', 'category'])
+            writer.writerow(['CoinDesk', 'https://www.coindesk.com/arc/outboundfeeds/rss/', 'crypto'])
+            writer.writerow(['Cointelegraph', 'https://cointelegraph.com/rss', 'crypto'])
+            writer.writerow(['Decrypt', 'https://decrypt.co/feed', 'crypto'])
+            writer.writerow(['The Block', 'https://www.theblockcrypto.com/feed', 'crypto'])
+            writer.writerow(['Bitcoin Magazine', 'https://bitcoinmagazine.com/.rss/full/', 'bitcoin'])
+        print(f"Sample CSV file created: {csv_file}")
+
+    try:
+        with open(csv_file, 'r') as file:
+            reader = csv.DictReader(file)
+            for row in reader:
+                if 'name' in row and 'rss_url' in row:
+                    websites.append({
+                        'name': row['name'],
+                        'rss_url': row['rss_url'],
+                        'category': row.get('category', 'general')
+                    })
+
+        print(f"Loaded {len(websites)} websites from {csv_file}")
+        return websites
+    except csv.Error as e:
+        print(f"CSV error loading file '{csv_file}': {e}")
+        messagebox.showerror("CSV Error", f"Error reading RSS feeds from CSV: {e}")
+        return []
+    except Exception as e:
+        print(f"Error loading CSV file '{csv_file}': {e}")
+        messagebox.showerror("File Error", f"Could not load RSS feeds from '{csv_file}': {e}")
+        return []
+
+def fetch_rss_feed(feed_url, source_name):
+    """
+    Fetch and parse an RSS feed
+    """
+    print(f"Fetching RSS feed from {source_name}...")
+    try:
+        feed = feedparser.parse(feed_url)
+        print(f"✅ Successfully fetched {len(feed.entries)} entries from {source_name}")
+        return feed
+    except Exception as e:
+        print(f"❌ Error fetching feed from {source_name}: {e}")
+        return None
+
+def format_date(date_str):
+    """Try to format the date in a consistent way using dateutil"""
+    try:
+        parsed_date = date_parser.parse(date_str)
+        return parsed_date.strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return date_str
+
+def get_entry_content(entry):
+    """Extract all available content from an RSS entry"""
+    content = ""
+
+    # Different feeds use different fields for content
+    if 'description' in entry:
+        content += entry.get('description', '') + ' '
+    if 'summary' in entry:
+        content += entry.get('summary', '') + ' '
+    if 'content' in entry:
+        # Some feeds have content as a list of dictionaries
+        if isinstance(entry.content, list):
+            for content_item in entry.content:
+                if 'value' in content_item:
+                    content += content_item.value + ' '
+        else:
+            content += str(entry.get('content', '')) + ' '
+
+    return content
+
+def normalize_crypto_symbol(symbol):
+    """Convert input to standard symbol format"""
+    symbol = symbol.lower().strip()
+
+    # Check direct matches first
+    if symbol in CRYPTO_INFO:
+        return symbol
+
+    # Check if it matches a name or alt_name in our dictionary
+    for key, info in CRYPTO_INFO.items():
+        if symbol == info['name'].lower() or symbol in info['alt_names']:
+            return key
+
+    # If no match, return the original (we'll handle unknown cryptos too)
+    return symbol
+
+def is_in_headline(title, crypto_symbol):
+    """
+    Check if the cryptocurrency name or symbol appears in the headline.
+    Returns True only if the crypto is mentioned in the title.
+    """
+    # Normalize the symbol
+    crypto_symbol = normalize_crypto_symbol(crypto_symbol)
+    title_lower = title.lower()
+
+    # Get crypto name and alternate names
+    if crypto_symbol in CRYPTO_INFO:
+        crypto_name = CRYPTO_INFO[crypto_symbol]['name'].lower()
+        alt_names = [name.lower() for name in CRYPTO_INFO[crypto_symbol]['alt_names']]
+        search_terms = [crypto_symbol.lower(), crypto_name] + alt_names
+    else:
+        # For unknown cryptos, just use the symbol
+        search_terms = [crypto_symbol.lower()]
+
+    # Check if any of the search terms are in the title
+    for term in search_terms:
+        # Check for exact term with word boundaries
+        pattern = r'\b' + re.escape(term) + r'\b'
+        if re.search(pattern, title_lower):
+            return True
+    
+    return False
+
+class CryptoNewsApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Crypto News Aggregator - Headline Filter")
+        self.root.geometry("900x700")
+
+        # Create main frame for the app
+        self.main_frame = ttk.Frame(self.root, padding="10")
+        self.main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Create search frame with input and buttons
+        self.create_search_frame()
+
+        # Create news display area
+        self.create_news_display()
+
+        # Status bar
+        self.status_var = tk.StringVar()
+        self.status_bar = ttk.Label(self.root, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
+        self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+
+        # Initialize variables
+        self.websites = load_websites_from_csv()
+        self.current_articles = []
+        self.status_var.set("Ready - Enter a cryptocurrency symbol or name to search for headline news.")
+
+    def create_search_frame(self):
+        """Create the search input and buttons"""
+        search_frame = ttk.Frame(self.main_frame, padding="5")
+        search_frame.pack(fill=tk.X)
+
+        # Search input
+        ttk.Label(search_frame, text="Cryptocurrency:").pack(side=tk.LEFT)
+        self.search_var = tk.StringVar()
+        self.search_entry = ttk.Entry(search_frame, textvariable=self.search_var, width=20)
+        self.search_entry.pack(side=tk.LEFT, padx=5)
+
+        # Search button
+        self.search_button = ttk.Button(search_frame, text="Search", command=self.search_news)
+        self.search_button.pack(side=tk.LEFT, padx=5)
+
+        # Refresh button
+        self.refresh_button = ttk.Button(search_frame, text="Refresh Feeds", command=self.refresh_feeds)
+        self.refresh_button.pack(side=tk.LEFT, padx=5)
+
+        # Options frame
+        options_frame = ttk.Frame(self.main_frame, padding="5")
+        options_frame.pack(fill=tk.X)
+
+        # Source selector
+        ttk.Label(options_frame, text="Sources:").pack(side=tk.LEFT)
+        self.source_var = tk.StringVar(value="all")
+        source_combo = ttk.Combobox(options_frame, textvariable=self.source_var, width=15)
+        source_combo['values'] = ['all', 'rss', 'cryptopanic']
+        source_combo.pack(side=tk.LEFT, padx=5)
+
+        # Sort selector
+        ttk.Label(options_frame, text="Sort by:").pack(side=tk.LEFT, padx=(15, 0))
+        self.sort_var = tk.StringVar(value="date")
+        sort_combo = ttk.Combobox(options_frame, textvariable=self.sort_var, width=15)
+        sort_combo['values'] = ['date', 'source']
+        sort_combo.pack(side=tk.LEFT, padx=5)
+
+        # Add a label to inform the user about headline filtering
+        ttk.Label(options_frame, text="HEADLINE ONLY FILTER ACTIVE", font=("Helvetica", 10, "bold")).pack(side=tk.RIGHT, padx=(15, 0))
+
+    def create_news_display(self):
+        """Create the news display area with a scrollable text widget"""
+        # Create a frame for the news display
+        display_frame = ttk.Frame(self.main_frame)
+        display_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+
+        # Create a scrolled text widget for displaying news
+        self.news_display = scrolledtext.ScrolledText(display_frame, wrap=tk.WORD)
+        self.news_display.pack(fill=tk.BOTH, expand=True)
+
+        # Configure tags for styling
+        self.news_display.tag_configure("title", font=("Helvetica", 12, "bold"))
+        self.news_display.tag_configure("source", font=("Helvetica", 10, "italic"), foreground="blue")
+        self.news_display.tag_configure("date", font=("Helvetica", 9), foreground="gray")
+        self.news_display.tag_configure("url", font=("Helvetica", 9, "underline"), foreground="blue")
+        self.news_display.tag_configure("separator", font=("Helvetica", 1))
+
+        # Make the text widget read-only
+        self.news_display.config(state=tk.DISABLED)
+
+    def search_news(self):
+        """Search for news based on the entered cryptocurrency"""
+        crypto_symbol = self.search_var.get().strip()
+        if not crypto_symbol:
+            messagebox.showinfo("Input Needed", "Please enter a cryptocurrency symbol or name.")
+            return
+
+        # Clear the current display
+        self.news_display.config(state=tk.NORMAL)
+        self.news_display.delete(1.0, tk.END)
+        self.news_display.config(state=tk.DISABLED)
+
+        # Update status
+        self.status_var.set(f"Searching for headline news about {crypto_symbol}...")
+
+        # Start a thread to fetch news
+        threading.Thread(target=self.fetch_news_thread, args=(crypto_symbol,), daemon=True).start()
+
+    def fetch_news_thread(self, crypto_symbol):
+        """Background thread to fetch news"""
+        self.current_articles = []
+
+        # Fetch from RSS feeds
+        if self.source_var.get() in ["all", "rss"]:
+            for website in self.websites:
+                feed = fetch_rss_feed(website['rss_url'], website['name'])
+                if feed:
+                    self.process_rss_feed(feed, website['name'], crypto_symbol)
+
+        # Fetch from CryptoPanic API
+        if self.source_var.get() in ["all", "cryptopanic"] and CRYPTO_PANIC_API_KEY:
+            self.fetch_cryptopanic_news(crypto_symbol)
+
+        # Sort the articles
+        self.sort_articles()
+
+        # Display the results
+        self.root.after(0, self.display_news_results)
+
+    def process_rss_feed(self, feed, source_name, crypto_symbol):
+        """Process an RSS feed to find relevant articles"""
+        for entry in feed.entries:
+            title = entry.get('title', '')
+            link = entry.get('link', '')
+            published = entry.get('published', entry.get('updated', 'Unknown date'))
+
+            # Check if the cryptocurrency is mentioned in the headline
+            if is_in_headline(title, crypto_symbol):
+                # Add this article to our results
+                self.current_articles.append({
+                    'title': title,
+                    'link': link,
+                    'published': published,
+                    'source': source_name
+                })
+
+    def fetch_cryptopanic_news(self, crypto_symbol):
+        """Fetch news from CryptoPanic API"""
+        self.status_var.set(f"Fetching from CryptoPanic for {crypto_symbol}...")
+        
+        try:
+            params = {
+                'auth_token': CRYPTO_PANIC_API_KEY,
+                'currencies': crypto_symbol,
+                'public': 'true'
+            }
+            
+            response = requests.get(CRYPTO_PANIC_URL, params=params)
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            if 'results' in data:
+                for result in data['results']:
+                    title = result.get('title', '')
+                    if not title and 'metadata' in result:
+                        title = result['metadata'].get('title', 'No Title')
+                    
+                    # Skip if no title
+                    if not title:
+                        continue
+                    
+                    # Check if the cryptocurrency is mentioned in the headline
+                    if is_in_headline(title, crypto_symbol):
+                        # Extract source domain from URL
+                        source = "CryptoPanic"
+                        if 'source' in result and 'domain' in result['source']:
+                            source = result['source']['domain']
+                        
+                        # Get published date
+                        published = result.get('published_at', 'Unknown')
+                        
+                        # Add to articles list
+                        self.current_articles.append({
+                            'title': title,
+                            'link': result.get('url', ''),
+                            'published': published,
+                            'source': source
+                        })
+                    
+            print(f"✅ Found {len(data.get('results', []))} articles from CryptoPanic")
+            
+        except Exception as e:
+            print(f"❌ Error fetching from CryptoPanic: {e}")
+            self.status_var.set(f"Error fetching from CryptoPanic: {e}")
+    
+    def sort_articles(self):
+        """Sort the articles based on selected criteria"""
+        sort_by = self.sort_var.get()
+        
+        if sort_by == "date":
+            # Try to parse dates and sort by newest first
+            self.current_articles.sort(key=lambda x: self.parse_date_for_sorting(x['published']), reverse=True)
+        elif sort_by == "source":
+            # Sort alphabetically by source
+            self.current_articles.sort(key=lambda x: x['source'])
+    
+    def parse_date_for_sorting(self, date_str):
+        """Try to parse a date string for sorting, return a timestamp"""
+        try:
+            # Try to parse with dateutil
+            dt = date_parser.parse(date_str)
+            return dt.timestamp()
+        except Exception:
+            # Return a very old timestamp if parsing fails
+            return 0
+    
+    def display_news_results(self):
+        """Display the news results in the text widget"""
+        self.news_display.config(state=tk.NORMAL)
+        self.news_display.delete(1.0, tk.END)
+        
+        if not self.current_articles:
+            self.news_display.insert(tk.END, f"No headlines found mentioning '{self.search_var.get()}'. Try a different cryptocurrency.")
+            self.status_var.set("No headline results found.")
+        else:
+            for article in self.current_articles:
+                # Format the date
+                formatted_date = format_date(article['published'])
+                
+                # Insert title with clickable link
+                self.news_display.insert(tk.END, f"{article['title']}\n", "title")
+                
+                # Insert source and date
+                self.news_display.insert(tk.END, f"Source: {article['source']} | {formatted_date}\n", "source")
+                
+                # Insert URL
+                url_text = f"URL: {article['link']}\n"
+                url_start = self.news_display.index(tk.END + "-1c linestart")
+                self.news_display.insert(tk.END, url_text, "url")
+                url_end = self.news_display.index(tk.END + "-1c")
+                
+                # Make URL clickable
+                self.news_display.tag_add("clickable", url_start, url_end)
+                self.news_display.tag_bind("clickable", "<Button-1>", 
+                                          lambda e, url=article['link']: self.open_url(url))
+                
+                # Add separator
+                self.news_display.insert(tk.END, "\n" + "-" * 80 + "\n\n", "separator")
+            
+            self.status_var.set(f"Found {len(self.current_articles)} headlines mentioning '{self.search_var.get()}'")
+    
+    def open_url(self, url):
+        """Open a URL in the default web browser"""
+        try:
+            webbrowser.open(url)
+        except Exception as e:
+            messagebox.showerror("Browser Error", f"Could not open URL: {e}")
+    
+    def refresh_feeds(self):
+        """Refresh all RSS feeds"""
+        # Re-load websites from CSV in case it was changed
+        self.websites = load_websites_from_csv()
+        
+        # If a search is already done, repeat it
+        if self.search_var.get():
+            self.search_news()
+        else:
+            self.status_var.set("RSS feeds refreshed. Enter a cryptocurrency to search.")
+
+# Main function to run the app
+def main():
+    root = tk.Tk()
+    app = CryptoNewsApp(root)
+    root.mainloop()
+
+if __name__ == "__main__":
+    main()
