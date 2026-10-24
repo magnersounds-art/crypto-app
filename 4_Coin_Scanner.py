@@ -45,11 +45,18 @@ TELEGRAM_BOT_TOKEN = _secret("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID   = _secret("TELEGRAM_CHAT_ID")
 HELIUS_RPC         = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}" if HELIUS_API_KEY else ""
 
+# Google Trends now runs through ONE guarded route (trends_core.py) and one shared panel (trends_ui.py).
+# This page no longer talks to Google itself.  Both files must sit next to this page.
+import sys
+from pathlib import Path
+_HERE = str(Path(__file__).parent.resolve())
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 try:
-    from pytrends.request import TrendReq
-    PYTRENDS_OK = True
-except ImportError:
-    PYTRENDS_OK = False
+    import trends_ui
+    TRENDS_UI_OK, TRENDS_UI_ERR = True, ""
+except ImportError as _e:
+    TRENDS_UI_OK, TRENDS_UI_ERR = False, str(_e)
 
 DS_BASE   = "https://api.dexscreener.com"
 DS_BOOSTS = f"{DS_BASE}/token-boosts/latest/v1"
@@ -656,25 +663,6 @@ def search_dex(query: str):
     pairs.sort(key=lambda p: (p.get("liquidity") or {}).get("usd") or 0, reverse=True)
     return pairs
 
-@st.cache_data(ttl=3600)
-def get_trends(keyword: str):
-    if not PYTRENDS_OK: return {"7d":0,"30d":0,"rising":[]}
-    try:
-        pt    = TrendReq(hl="en-US", tz=0, timeout=(5,15))
-        kw    = keyword if len(keyword) > 2 else keyword + " crypto"
-        pt.build_payload([kw], timeframe="now 7-d")
-        iot   = pt.interest_over_time()
-        avg7  = int(iot[kw].mean()) if not iot.empty else 0
-        time.sleep(1.5)
-        pt.build_payload([kw], timeframe="today 1-m")
-        iot2  = pt.interest_over_time()
-        avg30 = int(iot2[kw].mean()) if not iot2.empty else 0
-        rising_df = (pt.related_queries().get(kw) or {}).get("rising")
-        rising = rising_df.head(5)["query"].tolist() if rising_df is not None and not rising_df.empty else []
-        return {"7d": avg7, "30d": avg30, "rising": rising}
-    except Exception:
-        return {"7d":0,"30d":0,"rising":[]}
-
 def compute_badges(pair: dict):
     liq   = (pair.get("liquidity") or {}).get("usd")
     fdv   = pair.get("fdv")
@@ -1186,30 +1174,11 @@ with tab_onchain:
                 )
 
 # ── Tab: Google Trends ────────────────────────────────────────────────────────
+# Shared panel: manual LOAD/REFRESH button only, shared cache + cooldown, errors shown as errors (never zeros).
 with tab_tr:
-    st.markdown(_section_header("GOOGLE TRENDS  —  RETAIL SEARCH CURIOSITY", "#FF3131"), unsafe_allow_html=True)
-    if not PYTRENDS_OK:
-        st.markdown('<p style="color:#FFF;font-size:12px;">PYTRENDS NOT INSTALLED  —  RUN:  pip install pytrends</p>', unsafe_allow_html=True)
+    if not TRENDS_UI_OK:
+        st.markdown(
+            f'<p style="color:#FFF;font-size:12px;">GOOGLE TRENDS UNAVAILABLE  —  trends_core.py / trends_ui.py NOT FOUND '
+            f'NEXT TO THIS PAGE ({TRENDS_UI_ERR})</p>', unsafe_allow_html=True)
     else:
-        with st.spinner("FETCHING GOOGLE TRENDS…"):
-            trends = get_trends(name)
-        gr1, gr2 = st.columns(2)
-        for col, key, lbl in [(gr1,"7d","7-DAY AVG INTEREST"),(gr2,"30d","30-DAY AVG INTEREST")]:
-            v  = trends[key]
-            tc = "#39FF14" if v >= 60 else ("#FF5F1F" if v >= 30 else "#FF3131")
-            with col:
-                st.markdown(
-                    f'<div style="border:1px solid {tc};padding:16px;text-align:center;">'
-                    f'<div style="font-size:9px;color:{tc};text-transform:uppercase;letter-spacing:.1em;margin-bottom:8px;">{lbl}</div>'
-                    f'<div style="font-size:36px;font-weight:700;color:{tc};">{v}</div>'
-                    f'<div style="font-size:9px;color:#FFF;margin-top:4px;">OUT OF 100</div></div>',
-                    unsafe_allow_html=True,
-                )
-        if trends.get("rising"):
-            st.markdown(_section_header("RISING RELATED QUERIES", "#FF3131"), unsafe_allow_html=True)
-            st.markdown(
-                '<div style="margin-top:6px;">'
-                + "".join(f'<span style="border:1px solid #FF3131;color:#FF3131;font-size:10px;padding:3px 10px;margin:3px;display:inline-block;">{rq}</span>' for rq in trends["rising"])
-                + '</div>',
-                unsafe_allow_html=True,
-            )
+        trends_ui.render_trends_panel(name, key_prefix="meme", coin_id=token_addr or sym)

@@ -16,6 +16,16 @@ Changes in this revision:
 7.  ABOUT THIS COIN: native expander arrow removed (that was the overlapping
     "keyboard_arrow_down" text) — replaced with a simple ↓ / ↑ marker
 8.  ABOUT THIS COIN: description is cleaned of HTML and uses ONE font size
+
+Round 2:
+9.  Table rows: label and value sit close together, bigger fonts
+10. SUPPLY METRICS moved under MARKET; the SUPPLY tab is gone
+11. DEVELOPER tab + dev box = live GitHub API data (repos come from CoinGecko's links)
+12. COMMUNITY tab = honest data status + live Reddit panel (shows WAITING FOR REDDIT LOGIN until
+    REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET are in .env) + official links incl. GitHub
+13. GOOGLE TRENDS rebuilt: shared panel (trends_ui.py) + one guarded route (trends_core.py):
+    manual LOAD/REFRESH only, spacing + 429 cooldown, saved cache, errors shown as errors (never zeros)
+Needs these files in the same folder:  trends_core.py  trends_ui.py  devsocial_core.py
 """
 
 import csv
@@ -49,12 +59,6 @@ except ImportError:
     pass
 
 try:
-    from pytrends.request import TrendReq
-    PYTRENDS_OK = True
-except ImportError:
-    PYTRENDS_OK = False
-
-try:
     import feedparser
     RSS_OK = True
 except ImportError:
@@ -81,6 +85,21 @@ _env_path = _find_file(".env")
 if load_dotenv and _env_path:
     load_dotenv(_env_path)
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "")
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")                      # optional: 60 -> 5,000 requests/hour
+REDDIT_CLIENT_ID = os.getenv("REDDIT_CLIENT_ID", "")
+REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET", "")
+REDDIT_USER_AGENT = os.getenv("REDDIT_USER_AGENT", "script:celestial-intel-scanner:v1.0 (personal use)")
+
+import sys
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+try:
+    import trends_core
+    import trends_ui
+    import devsocial_core
+    CORE_OK, CORE_ERR = True, ""
+except ImportError as _e:
+    CORE_OK, CORE_ERR = False, str(_e)
 
 CG_BASE = "https://api.coingecko.com/api/v3"
 YT_SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
@@ -283,18 +302,18 @@ def _section_header(text, color):
 def _tbl_wrap(rows_html, color):
     return (
         f'<div style="border:1px solid {color};margin-top:4px;">'
-        f'<table style="width:100%;border-collapse:collapse;font-size:12px;">'
+        f'<table style="width:100%;border-collapse:collapse;font-size:15px;">'
         f'{rows_html}</table></div>'
     )
 
 def _tbl_row(label, value, color, header=False):
+    """Label column shrinks to its longest label (width:1%) so the value sits right next to it."""
     lc = color if header else "#FFFFFF"
-    vc = "#FFFFFF"
     return (
         f'<tr style="border-bottom:1px solid #333333;">'
-        f'<td style="padding:7px 12px;color:{lc};text-transform:uppercase;'
-        f'font-size:10px;white-space:nowrap;">{label}</td>'
-        f'<td style="padding:7px 12px;color:{vc};text-align:right;">{value}</td>'
+        f'<td style="padding:9px 8px 9px 14px;color:{lc};text-transform:uppercase;'
+        f'font-size:12px;white-space:nowrap;width:1%;">{label}</td>'
+        f'<td style="padding:9px 14px 9px 8px;color:#FFFFFF;text-align:left;font-size:15px;">{value}</td>'
         f'</tr>'
     )
 
@@ -376,86 +395,6 @@ def get_coin_detail(coin_id: str):
         return _cg_detail(coin_id)
     except Exception:
         return {}
-
-@st.cache_data(ttl=3600)
-def get_trends(keyword: str, gprop: str = ""):
-    """Fetch Google Trends data. gprop: '' (web), 'youtube', 'news', 'images'"""
-    empty = {"7d": 0, "30d": 0, "rising": [], "top_queries": [],
-             "rising_queries": [], "related_topics": [], "region_data": {}}
-    if not PYTRENDS_OK:
-        return empty
-    try:
-        pt  = TrendReq(hl="en-US", tz=0, timeout=(5, 25))
-        kw  = keyword if len(keyword) > 2 else keyword + " crypto"
-
-        pt.build_payload([kw], timeframe="now 7-d", gprop=gprop)
-        iot  = pt.interest_over_time()
-        avg7 = int(iot[kw].mean()) if not iot.empty else 0
-        time.sleep(1)
-
-        pt.build_payload([kw], timeframe="today 1-m", gprop=gprop)
-        iot2  = pt.interest_over_time()
-        avg30 = int(iot2[kw].mean()) if not iot2.empty else 0
-        time.sleep(1)
-
-        pt.build_payload([kw], timeframe="today 1-m", gprop=gprop)
-        related   = pt.related_queries()
-        rq_data   = related.get(kw, {}) or {}
-
-        top_df    = rq_data.get("top")
-        top_queries = []
-        if top_df is not None and not top_df.empty:
-            for _, row in top_df.head(10).iterrows():
-                top_queries.append({
-                    "query": str(row.get("query", "")),
-                    "value": int(row.get("value", 0)),
-                })
-
-        rising_df = rq_data.get("rising")
-        rising_queries = []
-        if rising_df is not None and not rising_df.empty:
-            for _, row in rising_df.head(10).iterrows():
-                val = row.get("value", 0)
-                rising_queries.append({
-                    "query": str(row.get("query", "")),
-                    "value": int(val) if val != "Breakout" else 5001,
-                    "breakout": (val == "Breakout" or int(val) >= 5000 if val != "Breakout" else True),
-                })
-        rising_legacy = [r["query"] for r in rising_queries[:5]]
-
-        time.sleep(1)
-        rt_data      = pt.related_topics()
-        rt_kw        = rt_data.get(kw, {}) or {}
-        topics_df    = rt_kw.get("top")
-        related_topics = []
-        if topics_df is not None and not topics_df.empty:
-            for _, row in topics_df.head(15).iterrows():
-                title = str(row.get("topic_title", ""))
-                val   = int(row.get("value", 0))
-                if title:
-                    related_topics.append({"title": title, "value": val})
-
-        time.sleep(1)
-        pt.build_payload([kw], timeframe="today 1-m", gprop=gprop)
-        try:
-            irb = pt.interest_by_region(resolution="COUNTRY", inc_low_vol=True, inc_geo_code=True)
-            region_data = {}
-            if not irb.empty:
-                irb_sorted = irb[kw].sort_values(ascending=False)
-                for geo, val in irb_sorted.head(20).items():
-                    if val > 0:
-                        region_data[str(geo)] = int(val)
-        except Exception:
-            region_data = {}
-
-        return {
-            "7d": avg7, "30d": avg30, "rising": rising_legacy,
-            "top_queries": top_queries, "rising_queries": rising_queries,
-            "related_topics": related_topics, "region_data": region_data,
-        }
-    except Exception:
-        return empty
-
 
 # ── FEED SCAN: RSS ────────────────────────────────────────────────────────────
 def load_sources():
@@ -672,6 +611,16 @@ def _note(text_html, color="#FFFFFF"):
     return f'<div style="font-size:12px;color:{color};padding:10px 0;line-height:1.5;">{text_html}</div>'
 
 
+@st.cache_resource
+def _get_sources():
+    """One GitHub source + one Reddit source for the whole app (keeps cache + rate-limit pauses)."""
+    gh = devsocial_core.CachedSource(lambda urls: devsocial_core.fetch_github(urls, GITHUB_TOKEN), devsocial_core.GH_TTL)
+    rd = devsocial_core.CachedSource(
+        lambda sub, term: devsocial_core.fetch_reddit(sub, term, REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, REDDIT_USER_AGENT),
+        devsocial_core.REDDIT_TTL)
+    return gh, rd
+
+
 # ── PAGE HEADER ───────────────────────────────────────────────────────────────
 now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d  %H:%M UTC")
 st.markdown(
@@ -749,6 +698,18 @@ with st.spinner(f"SCANNING  {active_query.upper()[:24]}…"):
             yt_state["hits"].sort(key=lambda h: h["pub_dt"] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
         except Exception as e:
             yt_state.update(status="error", msg=str(e))
+
+    # GitHub (dev activity) + Reddit (community): cached, no retries, pause on rate limit
+    gh_res = rd_res = None
+    if coin and detail and CORE_OK:
+        _links = detail.get("links") or {}
+        repo_urls = tuple([u for u in ((_links.get("repos_url") or {}).get("github") or []) if u][:devsocial_core.MAX_REPOS])
+        _gh_src, _rd_src = _get_sources()
+        gh_res = _gh_src.get(repo_urls, repo_urls)
+        _sub = devsocial_core.parse_subreddit(_links.get("subreddit_url", ""))
+        _term = (f'"{coin["name"]}"' if coin["name"].lower() == coin["symbol"].lower()
+                 else f'"{coin["name"]}" OR {coin["symbol"]}')
+        rd_res = _rd_src.get((_sub, _term), _sub, _term)
 
 yt_link = (
     "https://www.youtube.com/results?search_query="
@@ -898,7 +859,6 @@ if not (coin and detail):
 
 md      = detail.get("market_data",    {}) or {}
 cd      = detail.get("community_data", {}) or {}
-dev     = detail.get("developer_data", {}) or {}
 coin_name = detail.get("name") or coin["name"]
 
 def _g(*keys):
@@ -923,19 +883,72 @@ circ_s  = _g("market_data", "circulating_supply")
 total_s = _g("market_data", "total_supply")
 max_s   = _g("market_data", "max_supply")
 rank    = _g("market_data", "market_cap_rank")
-commits = dev.get("commit_count_4_weeks") or 0
-tw_f    = cd.get("twitter_followers") or 0
-tg_f    = cd.get("telegram_channel_user_count") or 0
+tg_f     = cd.get("telegram_channel_user_count") or 0
 reddit_s = cd.get("reddit_subscribers") or 0
 price_str = _price_full(price)
+links   = detail.get("links") or {}
+
+
+# ── helpers for the GitHub / Reddit panels ────────────────────────────────────
+def _note_box(title, text, color="#FF5F1F"):
+    return (
+        f'<div style="border:1px solid {color};padding:10px 14px;margin:6px 0;font-size:12px;'
+        f'color:#FFFFFF;line-height:1.6;"><b style="color:{color};">{title}</b> — {text}</div>'
+    )
+
+def _fmt_iso(iso):
+    try:
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        return f"{dt.strftime('%d %b %Y')} ({_age(dt)})"
+    except Exception:
+        return "—"
+
+def _gh_rate_txt(rate):
+    if not rate: return ""
+    return f"GITHUB API QUOTA: {rate['remaining']}/{rate['limit']} LEFT THIS HOUR"
+
+def _gh_best_commits(gh):
+    """-> (best_4w_commits_or_None, repos_list)"""
+    if not gh or not gh.get("ok") or not gh["data"] or gh["data"].get("no_repo"):
+        return None, []
+    repos = gh["data"]["repos"]
+    vals = [r["commits_4w"] for r in repos if r.get("commits_4w") is not None]
+    return (max(vals) if vals else None), repos
+
+def _dev_activity_html(gh):
+    if not CORE_OK:  return '<span style="color:#FF3131;">devsocial_core.py MISSING</span>'
+    if gh is None:   return "—"
+    if not gh.get("ok"):
+        return f'<span style="color:#FF3131;">{_esc(gh["error"]["message"])}</span>'
+    if gh["data"].get("no_repo"):
+        return "NO GITHUB REPO LINKED ON COINGECKO"
+    best, _ = _gh_best_commits(gh)
+    if best is None:
+        return "COMMIT DATA NOT READY — SCAN AGAIN IN A MINUTE"
+    return f'{_num(best)} <span style="font-size:11px;">COMMITS / 4 WKS (GITHUB)</span>'
+
+def _community_html():
+    if rd_res and rd_res.get("ok") and rd_res["data"].get("subreddit"):
+        sub = rd_res["data"]["subreddit"]
+        return f'{_num(sub["subscribers"])} <span style="font-size:11px;">REDDIT SUBSCRIBERS (LIVE)</span>'
+    if reddit_s:
+        return f'{_num(reddit_s)} <span style="font-size:11px;">REDDIT SUBSCRIBERS (COINGECKO)</span>'
+    if tg_f:
+        return f'{_num(tg_f)} <span style="font-size:11px;">TELEGRAM MEMBERS (COINGECKO)</span>'
+    if rd_res and not rd_res.get("ok") and rd_res["error"]["kind"] == "config":
+        return '<span style="color:#FF5F1F;">WAITING FOR REDDIT LOGIN</span>'
+    if rd_res and not rd_res.get("ok"):
+        return f'<span style="color:#FF3131;">{_esc(rd_res["error"]["message"])}</span>'
+    return "NO COMMUNITY DATA FOUND"
+
 
 st.markdown(_section_header("DETAILED DATA", "#FF5F1F"), unsafe_allow_html=True)
 
-tab_mkt, tab_supply, tab_community, tab_dev, tab_trends = st.tabs([
-    "📊  MARKET", "🪙  SUPPLY", "👥  COMMUNITY", "💻  DEVELOPER", "📈  GOOGLE TRENDS",
+tab_mkt, tab_community, tab_dev, tab_trends = st.tabs([
+    "📊  MARKET", "👥  COMMUNITY", "💻  DEVELOPER", "📈  GOOGLE TRENDS",
 ])
 
-# Tab 1: Market
+# ── Tab 1: Market (+ Supply Metrics) ──────────────────────────────────────────
 with tab_mkt:
     ma, mb = st.columns(2)
     with ma:
@@ -990,33 +1003,13 @@ with tab_mkt:
 
         st.markdown(_section_header("DEV ACTIVITY / COMMUNITY SIZE", "#8F00FF"), unsafe_allow_html=True)
         rows5 = (
-            _tbl_row("DEV ACTIVITY",
-                     f'{_num(commits)} <span style="font-size:9px;">COMMITS / 4 WKS</span>',
-                     "#8F00FF", True)
-            + _tbl_row("COMMUNITY SIZE",
-                       f'{_num(tw_f)} <span style="font-size:9px;">TWITTER/X FOLLOWERS</span>',
-                       "#8F00FF")
-            + _tbl_row("STATUS",
-                       '<span style="color:#FF3131;">NOT WORKING YET — TO BE LOOKED INTO</span>',
-                       "#8F00FF")
+            _tbl_row("DEV ACTIVITY",   _dev_activity_html(gh_res), "#8F00FF", True)
+            + _tbl_row("COMMUNITY SIZE", _community_html(),        "#8F00FF")
+            + _tbl_row("DETAIL", '<span style="font-size:12px;">SEE THE DEVELOPER AND COMMUNITY TABS</span>', "#8F00FF")
         )
         st.markdown(_tbl_wrap(rows5, "#8F00FF"), unsafe_allow_html=True)
 
-    # ABOUT THIS COIN — HTML cleaned, single font size, no Streamlit expander icon
-    desc_raw = (detail.get("description") or {}).get("en", "")
-    desc = _clean_text(desc_raw)
-    if desc:
-        LIMIT = 700
-        if len(desc) > LIMIT:
-            desc = desc[:LIMIT].rsplit(" ", 1)[0] + "…"
-        st.markdown(
-            f'<details class="about-box"><summary>ABOUT THIS COIN</summary>'
-            f'<div class="about-body">{_esc(desc)}</div></details>',
-            unsafe_allow_html=True,
-        )
-
-# Tab 2: Supply
-with tab_supply:
+    # SUPPLY METRICS (moved here from its own tab)
     st.markdown(_section_header("SUPPLY METRICS", "#FF5F1F"), unsafe_allow_html=True)
     circ_pct = (circ_s / max_s * 100) if (circ_s and max_s and max_s > 0) else None
     sa, sb = st.columns(2)
@@ -1052,7 +1045,7 @@ with tab_supply:
     if circ_pct is not None:
         st.markdown(
             f'<div style="margin-top:14px;">'
-            f'<div style="font-size:9px;color:#FFFFFF;text-transform:uppercase;'
+            f'<div style="font-size:11px;color:#FFFFFF;text-transform:uppercase;'
             f'letter-spacing:.08em;margin-bottom:6px;">'
             f'CIRCULATING SUPPLY  {circ_pct:.1f}%  OF MAX</div>'
             f'<div style="background:#111111;height:8px;border:1px solid #222222;">'
@@ -1061,308 +1054,199 @@ with tab_supply:
             unsafe_allow_html=True,
         )
 
-# Tab 3: Community
+    # ABOUT THIS COIN — HTML cleaned, single font size, no Streamlit expander icon
+    desc = _clean_text((detail.get("description") or {}).get("en", ""))
+    if desc:
+        LIMIT = 700
+        if len(desc) > LIMIT:
+            desc = desc[:LIMIT].rsplit(" ", 1)[0] + "…"
+        st.markdown(
+            f'<details class="about-box"><summary>ABOUT THIS COIN</summary>'
+            f'<div class="about-body">{_esc(desc)}</div></details>',
+            unsafe_allow_html=True,
+        )
+
+# ── Tab 2: Community ──────────────────────────────────────────────────────────
 with tab_community:
     st.markdown(_section_header("COMMUNITY SCALE", "#FF00FF"), unsafe_allow_html=True)
     st.markdown(
-        f'<div style="border:1px solid #222;padding:8px 12px;margin-bottom:10px;'
-        f'font-size:10px;color:#FFFFFF;">'
-        f'SOURCE: CoinGecko community_data (free API). '
-        f'Twitter/X data depends on CoinGecko\'s own scraping — may show 0 for some coins. '
-        f'No direct X/Grok API is used. Telegram and Reddit data similarly from CoinGecko.</div>',
+        '<div style="border:1px solid #222;padding:8px 12px;margin-bottom:10px;font-size:11px;color:#FFFFFF;line-height:1.6;">'
+        'SOURCES: Reddit official API (live, needs login keys) · CoinGecko (Telegram / Reddit counts, often empty). '
+        'X/Twitter follower counts are NOT available: CoinGecko removed that field in May 2025 and X has no free read API. '
+        'Missing data is shown as missing — never as a small community.</div>',
         unsafe_allow_html=True,
     )
     ca, cb = st.columns(2)
     with ca:
         rows = (
-            _tbl_row("TWITTER / X",   _num(tw_f),     "#FF00FF", True)
-            + _tbl_row("TELEGRAM",    _num(tg_f),     "#FF00FF")
-            + _tbl_row("REDDIT SUBS", _num(reddit_s), "#FF00FF")
+            _tbl_row("TWITTER / X", '<span style="color:#FF5F1F;font-size:12px;">NOT AVAILABLE (NO FREE SOURCE)</span>', "#FF00FF", True)
+            + _tbl_row("TELEGRAM", _num(tg_f) if tg_f else '<span style="font-size:12px;">NOT REPORTED BY COINGECKO</span>', "#FF00FF")
+            + _tbl_row("REDDIT (CG)", _num(reddit_s) if reddit_s else '<span style="font-size:12px;">NOT REPORTED BY COINGECKO</span>', "#FF00FF")
         )
         st.markdown(_tbl_wrap(rows, "#FF00FF"), unsafe_allow_html=True)
-    with cb:
-        largest = max(tw_f, tg_f, reddit_s, 1)
-        if largest >= 1_000_000:
-            comm_note = "TIER 1 — Massive established community.  Deep liquidity in retail."
-            comm_c    = "#39FF14"
-        elif largest >= 100_000:
-            comm_note = "TIER 2 — Solid community base.  Meaningful organic distribution."
-            comm_c    = "#FF5F1F"
-        elif largest >= 10_000:
-            comm_note = "TIER 3 — Growing community.  Still early-stage adoption."
-            comm_c    = "#FF5F1F"
-        else:
-            comm_note = "MICRO — Very small community.  High influencer concentration risk."
-            comm_c    = "#FF3131"
-        rows2 = (
-            _tbl_row("COMMUNITY TIER",
-                     f'<span style="color:{comm_c};font-weight:700;">'
-                     f'{comm_note.split("—")[0].strip()}</span>', "#FF00FF", True)
-            + _tbl_row("CONTEXT",
-                       f'<span style="color:{comm_c};font-size:10px;">{comm_note}</span>', "#FF00FF")
-        )
-        st.markdown(_tbl_wrap(rows2, "#FF00FF"), unsafe_allow_html=True)
 
-    links     = detail.get("links") or {}
+    with cb:
+        st.markdown(_section_header("REDDIT — LIVE", "#FF5F1F"), unsafe_allow_html=True)
+        waiting = (rd_res is not None and not rd_res.get("ok") and rd_res["error"]["kind"] == "config")
+        if not CORE_OK:
+            status = '<span style="color:#FF3131;">devsocial_core.py MISSING NEXT TO THIS PAGE</span>'
+        elif waiting:
+            status = '<span style="color:#FF5F1F;font-weight:700;">WAITING FOR REDDIT LOGIN</span>'
+        elif rd_res and not rd_res.get("ok"):
+            status = f'<span style="color:#FF3131;">{_esc(rd_res["error"]["message"])}</span>'
+        elif rd_res:
+            status = '<span style="color:#39FF14;font-weight:700;">CONNECTED</span>' + (
+                ' <span style="font-size:11px;">(CACHED)</span>' if rd_res.get("from_cache") else "")
+        else:
+            status = "—"
+        sub = (rd_res or {}).get("data", {}) or {}
+        sub_about = sub.get("subreddit") if sub else None
+        mentions = sub.get("mentions") if sub else None
+        sub_name = devsocial_core.parse_subreddit(links.get("subreddit_url", "")) if CORE_OK else None
+        rows_r = (
+            _tbl_row("STATUS", status, "#FF5F1F", True)
+            + _tbl_row("SUBREDDIT", f'r/{_esc(sub_name)}' if sub_name else "NONE LINKED ON COINGECKO", "#FF5F1F")
+            + _tbl_row("SUBSCRIBERS", _num(sub_about["subscribers"]) if sub_about else "—", "#FF5F1F")
+            + _tbl_row("ACTIVE NOW", _num(sub_about["active"]) if sub_about and sub_about.get("active") is not None else "—", "#FF5F1F")
+            + _tbl_row("POSTS MENTIONING (7D)", _num(mentions["count"]) if mentions else "—", "#FF5F1F")
+        )
+        st.markdown(_tbl_wrap(rows_r, "#FF5F1F"), unsafe_allow_html=True)
+
+    if waiting:
+        st.markdown(_note_box(
+            "TO TURN THIS ON",
+            'Create a Reddit app at reddit.com/prefs/apps (type "script"), then add REDDIT_CLIENT_ID and '
+            'REDDIT_CLIENT_SECRET to your .env and rescan. Until then the rows above stay empty on purpose.',
+            "#FF5F1F"), unsafe_allow_html=True)
+    elif rd_res and not rd_res.get("ok") and not waiting:
+        st.markdown(_note_box("REDDIT ERROR", _esc(rd_res["error"]["message"]), "#FF3131"), unsafe_allow_html=True)
+    if rd_res and rd_res.get("ok"):
+        for n in (rd_res["data"].get("notes") or []):
+            st.markdown(_note_box("NOTE", _esc(n), "#FF5F1F"), unsafe_allow_html=True)
+        if mentions and mentions["count"]:
+            pa, pb = st.columns(2)
+            with pa:
+                st.markdown(_section_header("MOST ACTIVE POSTERS (7D)", "#FF00FF"), unsafe_allow_html=True)
+                rows_a = "".join(
+                    _tbl_row(f'u/{_esc(a)}', f'{n} POST{"S" if n != 1 else ""}', "#FF00FF", i == 0)
+                    for i, (a, n) in enumerate(mentions["top_authors"])
+                ) or _tbl_row("—", "NONE", "#FF00FF")
+                st.markdown(_tbl_wrap(rows_a, "#FF00FF"), unsafe_allow_html=True)
+            with pb:
+                st.markdown(_section_header("TOP POSTS (7D)", "#FF00FF"), unsafe_allow_html=True)
+                posts_html = "".join(
+                    _item_html(p_["title"], p_["url"], "#FF00FF",
+                               f'<span>r/{_esc(p_["subreddit"])}</span><span>u/{_esc(p_["author"])}</span>'
+                               f'<span>{p_["score"]} pts</span><span>{p_["comments"]} comments</span>', "")
+                    for p_ in mentions["top_posts"]
+                )
+                st.markdown(f'<div style="border:1px solid #FF00FF;padding:6px 10px;">{posts_html}</div>', unsafe_allow_html=True)
+
+    # OFFICIAL LINKS (now includes GitHub + Telegram)
     tw_handle = links.get("twitter_screen_name", "")
     homepage  = (links.get("homepage") or [""])[0]
     subreddit = links.get("subreddit_url", "")
-    if any([tw_handle, homepage, subreddit]):
-        st.markdown(_section_header("OFFICIAL LINKS", "#FF00FF"), unsafe_allow_html=True)
-        links_html = ""
-        if homepage:
-            links_html += f'<a href="{homepage}" target="_blank" style="color:#FF00FF;text-decoration:none;border:1px solid #FF00FF;padding:3px 10px;margin:3px;display:inline-block;font-size:10px;">🌐 WEBSITE</a>'
-        if tw_handle:
-            links_html += f'<a href="https://twitter.com/{tw_handle}" target="_blank" style="color:#FF00FF;text-decoration:none;border:1px solid #FF00FF;padding:3px 10px;margin:3px;display:inline-block;font-size:10px;">🐦 @{tw_handle.upper()}</a>'
-        if subreddit:
-            links_html += f'<a href="{subreddit}" target="_blank" style="color:#FF00FF;text-decoration:none;border:1px solid #FF00FF;padding:3px 10px;margin:3px;display:inline-block;font-size:10px;">🟠 REDDIT</a>'
-        st.markdown(f'<div style="margin-top:6px;">{links_html}</div>', unsafe_allow_html=True)
+    gh_links  = [u for u in ((links.get("repos_url") or {}).get("github") or []) if u]
+    tg_id     = links.get("telegram_channel_identifier", "")
+    st.markdown(_section_header("OFFICIAL LINKS", "#FF00FF"), unsafe_allow_html=True)
+    chips = []
+    def _chip(url, text):
+        chips.append(
+            f'<span style="color:#FF00FF;"><a href="{_esc(url)}" target="_blank" '
+            f'style="text-decoration:none;border:1px solid #FF00FF;padding:4px 12px;margin:3px;'
+            f'display:inline-block;font-size:12px;">{text}</a></span>')
+    if homepage:  _chip(homepage, "🌐 WEBSITE")
+    if tw_handle: _chip(f"https://twitter.com/{tw_handle}", f"🐦 @{_esc(tw_handle.upper())}")
+    if subreddit: _chip(subreddit, "🟠 REDDIT")
+    if tg_id:     _chip(f"https://t.me/{tg_id}", "✈ TELEGRAM")
+    for u in gh_links[:5]:
+        pr = devsocial_core.parse_repo_url(u) if CORE_OK else None
+        _chip(u, f"💻 GITHUB: {_esc('/'.join(pr)) if pr else 'REPO'}")
+    if chips:
+        st.markdown(f'<div style="margin-top:6px;">{"".join(chips)}</div>', unsafe_allow_html=True)
+    else:
+        st.markdown(_note_box("NO LINKS", "CoinGecko lists no official links for this coin."), unsafe_allow_html=True)
+    if not gh_links:
+        st.markdown(_note_box("NO GITHUB LINK", "CoinGecko has no GitHub repository listed for this coin."), unsafe_allow_html=True)
 
-# Tab 4: Developer
+# ── Tab 3: Developer (live GitHub) ────────────────────────────────────────────
 with tab_dev:
     st.markdown(_section_header("GITHUB DEVELOPER ACTIVITY", "#007FFF"), unsafe_allow_html=True)
+    rate_txt = _gh_rate_txt((gh_res or {}).get("rate"))
     st.markdown(
-        f'<div style="border:1px solid #222;padding:8px 12px;margin-bottom:10px;'
-        f'font-size:10px;color:#FFFFFF;">'
-        f'SOURCE: CoinGecko developer_data (free API, pulled from GitHub). '
-        f'Many coins show 0 — this means CoinGecko has no linked GitHub repo for this coin, '
-        f'not necessarily that development is inactive. Check the official repo directly for confirmation.</div>',
+        '<div style="border:1px solid #222;padding:8px 12px;margin-bottom:10px;font-size:11px;color:#FFFFFF;line-height:1.6;">'
+        'SOURCE: GitHub official API, live. Repositories come from the links CoinGecko lists for the coin '
+        f'(first {devsocial_core.MAX_REPOS if CORE_OK else 2}). Cached 1 hour. '
+        '"4 WKS" = the last four weekly buckets GitHub reports (the newest is the week still running). '
+        + (f'<b style="color:#007FFF;">{rate_txt}</b>' if rate_txt else
+           'Add GITHUB_TOKEN to .env to raise the limit from 60 to 5,000 requests/hour.') + '</div>',
         unsafe_allow_html=True,
     )
-    da, db = st.columns(2)
-    prs_merged   = dev.get("pull_requests_merged")     or 0
-    contributors = dev.get("pull_request_contributors") or 0
-    stars        = dev.get("stars")        or 0
-    forks        = dev.get("forks")        or 0
-    total_issues = dev.get("total_issues") or 0
-    closed_issues= dev.get("closed_issues") or 0
-    issue_close_pct = (closed_issues / total_issues * 100) if total_issues > 0 else None
-    with da:
-        rows = (
-            _tbl_row("COMMITS (4 WEEKS)", _num(commits),      "#007FFF", True)
-            + _tbl_row("PRs MERGED",      _num(prs_merged),   "#007FFF")
-            + _tbl_row("CONTRIBUTORS",    _num(contributors), "#007FFF")
-            + _tbl_row("STARS",           _num(stars),        "#007FFF")
-            + _tbl_row("FORKS",           _num(forks),        "#007FFF")
-        )
-        st.markdown(_tbl_wrap(rows, "#007FFF"), unsafe_allow_html=True)
-    with db:
-        if commits >= 100:
-            dev_note  = "HIGHLY ACTIVE — Strong ongoing development.  Low abandonment risk."
-            dev_color = "#39FF14"
-        elif commits >= 20:
-            dev_note  = "ACTIVE — Regular development cadence."
-            dev_color = "#FF5F1F"
-        elif commits >= 1:
-            dev_note  = "LOW — Minimal recent commits.  Monitor for stagnation."
-            dev_color = "#FF5F1F"
-        else:
-            dev_note  = "INACTIVE — Zero commits in 4 weeks via CoinGecko.  Verify on GitHub directly."
-            dev_color = "#FF3131"
-        rows2 = (
-            _tbl_row("DEV STATUS",
-                     f'<span style="color:{dev_color};font-weight:700;">'
-                     f'{dev_note.split("—")[0].strip()}</span>', "#007FFF", True)
-            + _tbl_row("VERDICT",
-                       f'<span style="color:{dev_color};font-size:10px;">{dev_note}</span>', "#007FFF")
-            + _tbl_row("TOTAL ISSUES",   _num(total_issues),  "#007FFF")
-            + _tbl_row("CLOSED ISSUES",  _num(closed_issues), "#007FFF")
-            + _tbl_row("CLOSE RATE",
-                       f'{issue_close_pct:.0f}%' if issue_close_pct else "—", "#007FFF")
-        )
-        st.markdown(_tbl_wrap(rows2, "#007FFF"), unsafe_allow_html=True)
-    max_commits = 500
-    commit_pct  = min(commits / max_commits * 100, 100)
-    st.markdown(
-        f'<div style="margin-top:14px;">'
-        f'<div style="font-size:9px;color:#FFFFFF;text-transform:uppercase;'
-        f'letter-spacing:.08em;margin-bottom:6px;">'
-        f'4-WEEK COMMIT INTENSITY  ({commits} / {max_commits} max scale)</div>'
-        f'<div style="background:#111111;height:8px;border:1px solid #222222;">'
-        f'<div style="width:{commit_pct:.1f}%;height:100%;background:{dev_color};"></div>'
-        f'</div></div>',
-        unsafe_allow_html=True,
-    )
-
-# Tab 5: Google Trends
-with tab_trends:
-    st.markdown(_section_header("GOOGLE TRENDS  —  RETAIL SEARCH CURIOSITY", "#FF3131"), unsafe_allow_html=True)
-    if not PYTRENDS_OK:
-        st.markdown(
-            '<p style="color:#FFFFFF;font-size:12px;letter-spacing:.04em;">'
-            'PYTRENDS NOT INSTALLED  —  RUN:  pip install pytrends</p>',
-            unsafe_allow_html=True,
-        )
+    if not CORE_OK:
+        st.markdown(_note_box("MODULE MISSING", f"devsocial_core.py not found next to this page ({_esc(CORE_ERR)})", "#FF3131"), unsafe_allow_html=True)
+    elif gh_res is None:
+        st.markdown(_note_box("NO DATA", "GitHub was not queried."), unsafe_allow_html=True)
+    elif not gh_res.get("ok"):
+        st.markdown(_note_box("GITHUB ERROR", _esc(gh_res["error"]["message"]), "#FF3131"), unsafe_allow_html=True)
+    elif gh_res["data"].get("no_repo"):
+        st.markdown(_note_box(
+            "NO GITHUB REPO LINKED",
+            "CoinGecko lists no GitHub repository for this coin. That can mean the project is closed-source, "
+            "or simply that CoinGecko has no link. Development activity cannot be verified from here.", "#FF5F1F"),
+            unsafe_allow_html=True)
     else:
-        GPROP_MAP = {"WEB": "", "YOUTUBE": "youtube", "NEWS": "news", "IMAGES": "images"}
-        PLAT_DESCS = {
-            "WEB":     "Broadest retail interest — all Google web searches.",
-            "YOUTUBE": "Video demand — tutorial and explainer curiosity on YouTube.",
-            "NEWS":    "Formal financial news coverage and media attention.",
-            "IMAGES":  "Visual search interest (lower signal for crypto assets).",
-        }
-        st.markdown(
-            '<div style="font-size:9px;color:#FF3131;text-transform:uppercase;'
-            'letter-spacing:.1em;margin-bottom:4px;">PLATFORM PROPERTY</div>',
-            unsafe_allow_html=True,
-        )
-        plat_choice = st.radio(
-            "platform", list(GPROP_MAP.keys()),
-            horizontal=True, index=0,
-            label_visibility="collapsed",
-            key="trends_platform_radio",
-        )
-        cur_gprop = GPROP_MAP[plat_choice]
-        st.markdown(
-            f'<div style="font-size:10px;color:#FFFFFF;border:1px solid #222;'
-            f'padding:6px 10px;margin-bottom:14px;">{PLAT_DESCS[plat_choice]}</div>',
-            unsafe_allow_html=True,
-        )
-
-        with st.spinner("LOADING TRENDS DATA…"):
-            tr = get_trends(coin_name, gprop=cur_gprop)
-
-        gr1, gr2 = st.columns(2)
-        with gr1:
-            v7  = tr["7d"]
-            t7c = "#39FF14" if v7 >= 60 else ("#FF5F1F" if v7 >= 30 else "#FF3131")
-            st.markdown(
-                f'<div style="border:1px solid {t7c};padding:16px;text-align:center;">'
-                f'<div style="font-size:9px;color:{t7c};text-transform:uppercase;'
-                f'letter-spacing:.1em;margin-bottom:8px;">7-DAY AVG INTEREST</div>'
-                f'<div style="font-size:42px;font-weight:700;color:{t7c};">{v7}</div>'
-                f'<div style="font-size:9px;color:#FFFFFF;margin-top:4px;">OUT OF 100</div>'
-                f'</div>',
-                unsafe_allow_html=True,
+        repos = gh_res["data"]["repos"]
+        for e in gh_res["data"].get("repo_errors", []):
+            st.markdown(_note_box("REPO ERROR", _esc(e["message"]), "#FF3131"), unsafe_allow_html=True)
+        for r in repos:
+            info = r["info"]
+            st.markdown(_section_header(f'{_esc(r["owner"])}/{_esc(r["repo"])}', "#007FFF"), unsafe_allow_html=True)
+            c4  = r["commits_4w"]
+            cc  = ("100+" if r["contributors_capped"] else _num(r["contributors"])) if r["contributors"] is not None else "—"
+            rows = (
+                _tbl_row("COMMITS (4 WKS)",   _num(c4) if c4 is not None else "—",                "#007FFF", True)
+                + _tbl_row("COMMITS (52 WKS)", _num(r["commits_52w"]) if r["commits_52w"] is not None else "—", "#007FFF")
+                + _tbl_row("PRs MERGED (4 WKS)", _num(r["prs_merged_4w"]) if r["prs_merged_4w"] is not None else "—", "#007FFF")
+                + _tbl_row("CONTRIBUTORS",    cc,                                                  "#007FFF")
+                + _tbl_row("STARS",           _num(info["stars"]),                                 "#007FFF")
+                + _tbl_row("FORKS",           _num(info["forks"]),                                 "#007FFF")
+                + _tbl_row("OPEN ISSUES + PRs", _num(info["open_issues_and_prs"]),                 "#007FFF")
+                + _tbl_row("LAST PUSH",       _fmt_iso(info["pushed_at"]),                         "#007FFF")
+                + _tbl_row("ARCHIVED",        "YES — READ-ONLY" if info["archived"] else "NO",      "#007FFF")
             )
-        with gr2:
-            v30  = tr["30d"]
-            t30c = "#39FF14" if v30 >= 60 else ("#FF5F1F" if v30 >= 30 else "#FF3131")
+            st.markdown(_tbl_wrap(rows, "#007FFF"), unsafe_allow_html=True)
+            for n in r["notes"]:
+                st.markdown(_note_box("NOTE", _esc(n), "#FF5F1F"), unsafe_allow_html=True)
+
+        best, _ = _gh_best_commits(gh_res)
+        if best is None:
+            dev_note, dev_color = "UNKNOWN — GitHub has not returned commit statistics yet.  Scan again in a minute.", "#FF5F1F"
+        elif best >= 100:
+            dev_note, dev_color = "HIGHLY ACTIVE — Strong ongoing development.", "#39FF14"
+        elif best >= 20:
+            dev_note, dev_color = "ACTIVE — Regular development cadence.", "#39FF14"
+        elif best >= 1:
+            dev_note, dev_color = "LOW — Few recent commits.  Monitor for stagnation.", "#FF5F1F"
+        else:
+            dev_note, dev_color = "NO COMMITS IN THE LAST 4 WEEKS (verified on GitHub).  Check LAST PUSH above.", "#FF3131"
+        st.markdown(_section_header("DEV STATUS", "#007FFF"), unsafe_allow_html=True)
+        st.markdown(_tbl_wrap(
+            _tbl_row("VERDICT", f'<span style="color:{dev_color};font-weight:700;">{dev_note}</span>', "#007FFF", True),
+            "#007FFF"), unsafe_allow_html=True)
+        if best is not None:
+            commit_pct = min(best / 500 * 100, 100)
             st.markdown(
-                f'<div style="border:1px solid {t30c};padding:16px;text-align:center;">'
-                f'<div style="font-size:9px;color:{t30c};text-transform:uppercase;'
-                f'letter-spacing:.1em;margin-bottom:8px;">30-DAY AVG INTEREST</div>'
-                f'<div style="font-size:42px;font-weight:700;color:{t30c};">{v30}</div>'
-                f'<div style="font-size:9px;color:#FFFFFF;margin-top:4px;">OUT OF 100</div>'
-                f'</div>',
+                f'<div style="margin-top:14px;">'
+                f'<div style="font-size:11px;color:#FFFFFF;text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px;">'
+                f'4-WEEK COMMIT INTENSITY  ({best} / 500 max scale, most active repo)</div>'
+                f'<div style="background:#111111;height:8px;border:1px solid #222222;">'
+                f'<div style="width:{commit_pct:.1f}%;height:100%;background:{dev_color};"></div></div></div>',
                 unsafe_allow_html=True,
             )
 
-        st.markdown(_section_header("INTEREST BY REGION  —  TOP 20 COUNTRIES", "#FF3131"), unsafe_allow_html=True)
-        st.markdown(
-            '<div style="font-size:10px;color:#FFFFFF;border:1px solid #222;'
-            'padding:6px 10px;margin-bottom:10px;">'
-            'Relative search volume (0–100) by country. Higher bar = stronger regional demand. '
-            'Pinpoints which global economies are driving current interest in this asset.</div>',
-            unsafe_allow_html=True,
-        )
-        region_data = tr.get("region_data", {})
-        if region_data:
-            max_region = max(region_data.values(), default=1)
-            region_html = ""
-            for country, val in sorted(region_data.items(), key=lambda x: -x[1]):
-                bar_w = int(val / max_region * 100)
-                bar_c = "#39FF14" if val >= 70 else ("#FF5F1F" if val >= 40 else "#FF3131")
-                region_html += (
-                    f'<div style="display:flex;align-items:center;margin-bottom:5px;">'
-                    f'<div style="width:130px;font-size:10px;color:#FFFFFF;'
-                    f'text-transform:uppercase;flex-shrink:0;letter-spacing:.04em;">{country}</div>'
-                    f'<div style="flex:1;background:#111;height:14px;border:1px solid #222;margin:0 8px;">'
-                    f'<div style="width:{bar_w}%;height:100%;background:{bar_c};"></div>'
-                    f'</div>'
-                    f'<div style="width:28px;font-size:10px;color:{bar_c};font-weight:700;text-align:right;">{val}</div>'
-                    f'</div>'
-                )
-            st.markdown(f'<div style="border:1px solid #FF3131;padding:12px;">{region_html}</div>', unsafe_allow_html=True)
-        else:
-            st.markdown('<div style="border:1px solid #333;padding:10px;font-size:10px;color:#555;">NO REGIONAL DATA RETURNED — GOOGLE MAY HAVE RATE-LIMITED THIS REQUEST.</div>', unsafe_allow_html=True)
-
-        st.markdown(_section_header("TOP RELATED QUERIES", "#FF3131"), unsafe_allow_html=True)
-        st.markdown(
-            '<div style="font-size:10px;color:#FFFFFF;border:1px solid #222;'
-            'padding:6px 10px;margin-bottom:10px;">'
-            'High-volume search phrases users look up alongside this asset. '
-            'Progress bar shows relative weight (0–100). Surfaces core retail narratives.</div>',
-            unsafe_allow_html=True,
-        )
-        top_queries = tr.get("top_queries", [])
-        if top_queries:
-            tq_html = ""
-            for tq in top_queries:
-                bar_w = int(tq["value"])
-                tq_html += (
-                    f'<div style="margin-bottom:8px;">'
-                    f'<div style="display:flex;justify-content:space-between;margin-bottom:3px;">'
-                    f'<span style="font-size:10px;color:#FFFFFF;text-transform:uppercase;letter-spacing:.04em;">{tq["query"]}</span>'
-                    f'<span style="font-size:10px;color:#FF3131;font-weight:700;">{bar_w}</span>'
-                    f'</div>'
-                    f'<div style="background:#111;height:6px;border:1px solid #222;">'
-                    f'<div style="width:{bar_w}%;height:100%;background:#FF3131;"></div>'
-                    f'</div></div>'
-                )
-            st.markdown(f'<div style="border:1px solid #FF3131;padding:12px;">{tq_html}</div>', unsafe_allow_html=True)
-        else:
-            st.markdown('<div style="border:1px solid #333;padding:10px;font-size:10px;color:#555;">NO RELATED QUERY DATA RETURNED.</div>', unsafe_allow_html=True)
-
-        st.markdown(_section_header("RISING RELATED QUERIES  —  BREAKOUT RADAR", "#FF3131"), unsafe_allow_html=True)
-        st.markdown(
-            '<div style="font-size:10px;color:#FFFFFF;border:1px solid #222;'
-            'padding:6px 10px;margin-bottom:10px;">'
-            'Sudden-growth search phrases. '
-            '<span style="color:#FF3131;font-weight:700;">🔥 BREAKOUT</span> = &gt;5000% growth. '
-            'Acts as a real-time radar for sudden market panic or FOMO forming right now.</div>',
-            unsafe_allow_html=True,
-        )
-        rising_queries = tr.get("rising_queries", [])
-        if not rising_queries and tr.get("rising"):
-            rising_queries = [{"query": q_, "value": 100, "breakout": False} for q_ in tr["rising"]]
-        if rising_queries:
-            pills_html = ""
-            for rq in rising_queries:
-                is_breakout = rq.get("breakout") or rq["value"] >= 5000
-                if is_breakout:
-                    badge_bg, badge_txt, pill_border = "#FF3131", "🔥 BREAKOUT", "#FF3131"
-                elif rq["value"] >= 1000:
-                    badge_bg, badge_txt, pill_border = "#FF5F1F", f"+{rq['value']}%", "#FF5F1F"
-                else:
-                    badge_bg, badge_txt, pill_border = "#222", f"+{rq['value']}%", "#555"
-                pills_html += (
-                    f'<span style="display:inline-flex;align-items:center;'
-                    f'border:1px solid {pill_border};padding:5px 10px;margin:4px;">'
-                    f'<span style="font-size:10px;color:#FFFFFF;text-transform:uppercase;'
-                    f'letter-spacing:.04em;margin-right:6px;">{rq["query"]}</span>'
-                    f'<span style="font-size:9px;background:{badge_bg};color:#FFFFFF;'
-                    f'font-weight:700;padding:2px 6px;">{badge_txt}</span>'
-                    f'</span>'
-                )
-            st.markdown(f'<div style="border:1px solid #FF3131;padding:10px;">{pills_html}</div>', unsafe_allow_html=True)
-        else:
-            st.markdown('<div style="border:1px solid #333;padding:10px;font-size:10px;color:#555;">NO RISING QUERY DATA RETURNED.</div>', unsafe_allow_html=True)
-
-        st.markdown(_section_header("RELATED TOPICS  —  MACRO THEME RADAR", "#FF3131"), unsafe_allow_html=True)
-        st.markdown(
-            '<div style="font-size:10px;color:#FFFFFF;border:1px solid #222;'
-            'padding:6px 10px;margin-bottom:10px;">'
-            'Macro themes, competitor assets, and broad concepts users explore alongside this coin. '
-            'Tag size is proportional to relative search volume index.</div>',
-            unsafe_allow_html=True,
-        )
-        related_topics = tr.get("related_topics", [])
-        if related_topics:
-            max_topic    = max((t["value"] for t in related_topics), default=1)
-            topic_colors = ["#FF3131","#FF5F1F","#00FFFF","#39FF14","#FF00FF","#007FFF","#8F00FF"]
-            bubbles_html = ""
-            for ti, topic in enumerate(related_topics):
-                tc       = topic_colors[ti % len(topic_colors)]
-                norm_val = topic["value"] / max_topic
-                fsize    = int(10 + norm_val * 8)
-                pad_h    = int(6 + norm_val * 10)
-                bubbles_html += (
-                    f'<span style="display:inline-block;border:1px solid {tc};color:{tc};'
-                    f'font-size:{fsize}px;font-weight:700;padding:4px {pad_h}px;margin:4px;'
-                    f'text-transform:uppercase;letter-spacing:.06em;">'
-                    f'{topic["title"]}</span>'
-                )
-            st.markdown(f'<div style="border:1px solid #FF3131;padding:12px;">{bubbles_html}</div>', unsafe_allow_html=True)
-        else:
-            st.markdown('<div style="border:1px solid #333;padding:10px;font-size:10px;color:#555;">NO RELATED TOPIC DATA RETURNED.</div>', unsafe_allow_html=True)
+# ── Tab 4: Google Trends — shared panel (manual button, shared cache + cooldown) ──
+with tab_trends:
+    if not CORE_OK:
+        st.markdown(_note_box("MODULE MISSING", f"trends_core.py / trends_ui.py not found next to this page ({_esc(CORE_ERR)})", "#FF3131"), unsafe_allow_html=True)
+    else:
+        trends_ui.render_trends_panel(coin_name, key_prefix="crypto", coin_id=coin["id"])

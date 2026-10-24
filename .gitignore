@@ -22,3 +22,10 @@ news_stories_log.csv
 
 .agents/
 ebay Tool.code-workspace
+
+.trends_state.json
+.trends_probe_last_run
+trends_probe_result.json
+*.bak
+New files/
+backup_*/
