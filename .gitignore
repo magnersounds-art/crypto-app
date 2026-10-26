@@ -29,3 +29,8 @@ trends_probe_result.json
 *.bak
 New files/
 backup_*/
+
+# Local cache and backups
+.trends_cache.json
+backups/
+shill_filter_search.txt

@@ -51,8 +51,7 @@ pages = [
     st.Page("0_home.py", title="HOME", icon="🏠", url_path="home"),
     st.Page("1_News_Feed.py", title="NEWS FEED", icon="📰", url_path="news-feed"),
     st.Page("2_Sectors.py", title="SECTORS", icon="📊", url_path="sectors"),
-    st.Page("3_Coin_Scanner.py", title="CRYPTO SCANNER", icon="🪙", url_path="crypto-scanner"),
-    st.Page("4_Coin_Scanner.py", title="MEME COIN SCANNER", icon="🐸", url_path="meme-coin-scanner"),
+    st.Page("scanner_hub.py", title="SCANNER", icon="🔍", url_path="scanner"),
     st.Page("5_Celestial_Intel.py", title="CELESTIAL INTEL", icon="🌙", url_path="celestial-intel"),
     st.Page("6_Shill_Tracker.py", title="SHILL TRACKER", icon="📡", url_path="shill-tracker"),
 ]

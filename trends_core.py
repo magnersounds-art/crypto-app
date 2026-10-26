@@ -12,7 +12,7 @@ Every scanner page calls TrendsGuard.request() — nothing else may talk to Goog
     file) so they survive Streamlit reruns and process restarts; the file holds only Trends results and
     timestamps — no keys, cookies or credentials
   * TRENDS_ENABLED=false is an emergency stop only (live requests off, stored data still shown); default is on
-The library (trendspy, or pytrends only if trendspy is not installed) is chosen once per request; there is no
+The library (pytrends, or trendspy only if pytrends is not installed) is chosen once per request; there is no
 second client that retries after a failure.  Both are UNOFFICIAL: Google has no public Trends API, publishes no
 rate limit, and may refuse automated requests at any time.
 
@@ -86,7 +86,7 @@ def classify_exception(exc):
         return TrendsRequestError(
             "unexpected_response",
             f"Google answered with something the library could not read ({name}: {text[:80]}) — "
-            "usually a block / consent page rather than data")
+            "this can be a block / consent page (if it happens on the first call) or a parsing limitation of the library")
     return TrendsRequestError("http", f"{name}: {text[:120]}")
 
 
@@ -242,26 +242,29 @@ def _sections_blank(state="skipped", message=""):
     }
 
 
-def _load_backend(keyword, gprop, timeframe, geo):
-    """Preferred: trendspy (maintained, free). Fallback: pytrends (archived). Returns
-    (backend_name, list_of_(section, callable)).  max_retries=1 means exactly ONE attempt."""
-    try:
-        from trendspy import Trends
-        tr = Trends(request_delay=2.0, max_retries=1)
-        res = "COUNTRY" if not geo else None
-        return "trendspy", [
-            ("interest", lambda: tr.interest_over_time(keyword, timeframe=timeframe, geo=geo, gprop=gprop)),
-            ("regions", lambda: tr.interest_by_region(keyword, timeframe=timeframe, geo=geo, gprop=gprop,
-                                                      resolution=res, inc_low_vol=True)),
-            ("queries", lambda: tr.related_queries(keyword, timeframe=timeframe, geo=geo, gprop=gprop)),
-            ("topics", lambda: tr.related_topics(keyword, timeframe=timeframe, geo=geo, gprop=gprop)),
-        ]
-    except ImportError:
-        pass
-    try:
-        from pytrends.request import TrendReq
-    except ImportError:
-        raise TrendsRequestError("library_missing", "Neither trendspy nor pytrends is installed — run: pip install trendspy")
+# Backend preference. pytrends first: on 24 Oct 2026 a direct pytrends request succeeded from the project's
+# machine while the same machine got HTTP 429 from trendspy.  trendspy is only used if pytrends cannot be
+# imported.  A failed REQUEST never switches client — there is exactly one client per pass, no cross-client retry.
+BACKEND_ORDER = ("pytrends", "trendspy")
+
+
+def _build_trendspy(keyword, gprop, timeframe, geo):
+    """max_retries=1 means exactly ONE attempt per HTTP request. Raises ImportError if not installed."""
+    from trendspy import Trends
+    tr = Trends(request_delay=2.0, max_retries=1)
+    res = "COUNTRY" if not geo else None
+    return "trendspy", [
+        ("interest", lambda: tr.interest_over_time(keyword, timeframe=timeframe, geo=geo, gprop=gprop)),
+        ("regions", lambda: tr.interest_by_region(keyword, timeframe=timeframe, geo=geo, gprop=gprop,
+                                                  resolution=res, inc_low_vol=True)),
+        ("queries", lambda: tr.related_queries(keyword, timeframe=timeframe, geo=geo, gprop=gprop)),
+        ("topics", lambda: tr.related_topics(keyword, timeframe=timeframe, geo=geo, gprop=gprop)),
+    ]
+
+
+def _build_pytrends(keyword, gprop, timeframe, geo):
+    """Raises ImportError if not installed."""
+    from pytrends.request import TrendReq
     pt = TrendReq(hl="en-US", tz=0, timeout=(5, 25))     # retries left at default 0
     state = {"ready": False}
 
@@ -283,6 +286,20 @@ def _load_backend(keyword, gprop, timeframe, geo):
     ]
 
 
+_BUILDERS = {"pytrends": _build_pytrends, "trendspy": _build_trendspy}
+
+
+def _load_backend(keyword, gprop, timeframe, geo):
+    """First importable client in BACKEND_ORDER. Returns (backend_name, list_of_(section, callable))."""
+    for name in BACKEND_ORDER:
+        try:
+            return _BUILDERS[name](keyword, gprop, timeframe, geo)
+        except ImportError:
+            continue
+    raise TrendsRequestError("library_missing",
+                             "Neither pytrends nor trendspy is installed — run: pip install pytrends trendspy")
+
+
 def fetch_live(keyword, gprop="", timeframe=TIMEFRAME, geo="", backend_factory=None):
     """ONE pass over the four sections. Returns a result dict; never raises, never fakes zeros."""
     keyword = keyword.strip()
@@ -301,20 +318,34 @@ def fetch_live(keyword, gprop="", timeframe=TIMEFRAME, geo="", backend_factory=N
     result["backend"] = backend
 
     raw, req_err = {}, None
+    any_ok, stopped = False, False
     for name, fn in calls:
-        if req_err is not None:
+        if req_err is not None or stopped:
             raw[name] = ("skipped", None)
             continue
         result["calls_attempted"] += 1
         try:
             raw[name] = ("ok", fn())
-        except Exception as e:                       # a REQUEST failed: stop sending anything else
-            req_err = classify_exception(e)
-            raw[name] = ("error", req_err)
+            any_ok = True
+        except Exception as e:
+            err = classify_exception(e)
+            if err.kind == "unexpected_response" and any_ok:
+                # Google already answered an earlier call in this pass, so this is the library failing to read
+                # ONE response (e.g. pytrends IndexError on related topics), not a block.  Record it against
+                # that section only — no request failure, no cooldown — but still send nothing further.
+                raw[name] = ("unreadable",
+                             f"{backend} could not read Google's reply for this section ({type(e).__name__}: "
+                             f"{str(e)[:60]}). Google did answer the request, so this is a library parsing "
+                             "limitation, not a block.")
+                stopped = True
+            else:                                    # a REQUEST failed: stop sending anything else
+                req_err = err
+                raw[name] = ("error", err)
 
     secs = result["sections"]
     err_state = "rate_limited" if (req_err and req_err.kind == "rate_limit") else "failed"
-    skip_msg = "Not requested because an earlier request failed."
+    skip_msg = ("Not requested because an earlier request failed." if req_err
+                else "Not requested: an earlier section could not be read, so the pass stopped there.")
 
     def _apply(name, parser, *args, targets=None):
         tag, payload = raw.get(name, ("skipped", None))
@@ -331,6 +362,9 @@ def fetch_live(keyword, gprop="", timeframe=TIMEFRAME, geo="", backend_factory=N
         elif tag == "error":
             for t in targets:
                 secs[t] = {**_sections_blank(err_state)[t], "message": payload.message}
+        elif tag == "unreadable":
+            for t in targets:
+                secs[t] = {**_sections_blank("malformed")[t], "message": payload}
         else:
             for t in targets:
                 secs[t] = {**_sections_blank("skipped")[t], "message": skip_msg}
@@ -345,13 +379,15 @@ def fetch_live(keyword, gprop="", timeframe=TIMEFRAME, geo="", backend_factory=N
     _apply("topics", parse_topics)
 
     result["error"] = req_err.as_dict() if req_err else None
-    states = [secs[s]["state"] for s in ("interest", "regions", "queries", "rising", "topics")]
     bad = {"failed", "rate_limited", "skipped", "malformed"}
     if secs["interest"]["state"] in bad:
         result["status"] = "error"
-    elif any(s in bad for s in states):
-        result["status"] = "partial"
+    elif req_err is not None:
+        result["status"] = "partial"          # a request failed part-way: retry later is meaningful
     else:
+        # Interest is good and Google answered every request we sent. A section the library could not read
+        # (malformed / stopped) is shown as such, but asking again would not change it, so the pass counts as
+        # complete: it is cached and the normal refresh window applies.
         result["status"] = "ok"
     return result
 
